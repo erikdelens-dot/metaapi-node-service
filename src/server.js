@@ -271,13 +271,44 @@ app.post('/api/create-copy-link', async (req, res) => {
     // Update account om SUBSCRIBER rol toe te voegen
     if (!account.copyFactoryRoles || !account.copyFactoryRoles.includes('SUBSCRIBER')) {
       console.log('Adding SUBSCRIBER role to account');
-      // Account moet SUBSCRIBER rol hebben voor copy trading
-      return res.status(400).json({
-        ok: false,
-        error: 'Account must have SUBSCRIBER copyFactoryRoles. Please add this via MetaApi dashboard.',
-        accountId,
-        currentRoles: account.copyFactoryRoles || []
-      });
+      
+      try {
+        const updateResponse = await fetch(`https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai/users/current/accounts/${accountId}`, {
+          method: 'PUT',
+          headers: {
+            'auth-token': TOKEN,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            copyFactoryRoles: ['SUBSCRIBER']
+          })
+        });
+
+        if (!updateResponse.ok) {
+          const errorText = await updateResponse.text();
+          console.warn('Failed to add SUBSCRIBER role via API:', errorText);
+          
+          return res.status(400).json({
+            ok: false,
+            error: 'Account must have SUBSCRIBER copyFactoryRoles. Please add this via MetaApi dashboard.',
+            accountId,
+            currentRoles: account.copyFactoryRoles || [],
+            suggestion: 'Go to https://app.metaapi.cloud and add SUBSCRIBER role to your account'
+          });
+        } else {
+          console.log('Successfully added SUBSCRIBER role');
+          // Wacht even zodat de rol update wordt doorgevoerd
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      } catch (roleError) {
+        console.error('Error adding SUBSCRIBER role:', roleError);
+        return res.status(400).json({
+          ok: false,
+          error: 'Failed to add SUBSCRIBER role automatically. Please add via MetaApi dashboard.',
+          accountId,
+          currentRoles: account.copyFactoryRoles || []
+        });
+      }
     }
 
     // CopyFactory met juiste initialisatie
