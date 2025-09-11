@@ -1,0 +1,12 @@
+{
+  "name": "metaapi-node-service",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.2",
+    "express": "^4.19.2",
+    "metaapi.cloud-sdk": "^25.0.0"
+  }
+}
