@@ -168,24 +168,88 @@ app.get('/api/account-metrics', async (req, res) => {
     const api = new MetaApi(TOKEN, { domain: `agiliumtrade.agiliumtrade.ai` });
     const account = await api.metatraderAccountApi.getAccount(id);
     
+    console.log('Account state:', account.state);
+    console.log('Account connection status:', account.connectionStatus);
+    
     if (account.state !== 'DEPLOYED') {
-      return res.status(400).json({ ok:false, error:'Account not deployed' });
+      return res.status(400).json({ 
+        ok:false, 
+        error:'Account not deployed', 
+        state: account.state,
+        connectionStatus: account.connectionStatus 
+      });
     }
     
-    await account.waitConnected();
+    // Wacht op verbinding met timeout
+    try {
+      await Promise.race([
+        account.waitConnected(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), 30000))
+      ]);
+    } catch (timeoutErr) {
+      return res.status(400).json({ 
+        ok:false, 
+        error: 'Account connection timeout. Try again in a few minutes.',
+        state: account.state,
+        connectionStatus: account.connectionStatus 
+      });
+    }
 
-    const info = await account.getAccountInformation();
-    const positions = await account.getPositions();
-    const orders = await account.getOrders();
+    // Check of methods bestaan voordat je ze aanroept
+    if (!account.getAccountInformation || typeof account.getAccountInformation !== 'function') {
+      return res.status(400).json({ 
+        ok:false, 
+        error: 'Account methods not available. Account may still be starting up.',
+        accountId: id,
+        state: account.state,
+        connectionStatus: account.connectionStatus,
+        suggestion: 'Wait a few minutes and try again'
+      });
+    }
+
+    // Probeer account informatie op te halen
+    let info, positions, orders;
+    
+    try {
+      info = await account.getAccountInformation();
+    } catch (infoErr) {
+      console.error('Failed to get account info:', infoErr);
+      return res.status(400).json({ 
+        ok:false, 
+        error: 'Failed to retrieve account information',
+        details: infoErr.message,
+        suggestion: 'Account may still be connecting. Try again in a few minutes.'
+      });
+    }
+
+    try {
+      positions = await account.getPositions();
+      orders = await account.getOrders();
+    } catch (posErr) {
+      console.warn('Failed to get positions/orders:', posErr);
+      // Continue zonder positions/orders als dat faalt
+      positions = [];
+      orders = [];
+    }
 
     return res.json({
       ok: true,
       info,
-      counts: { positions: positions?.length || 0, orders: orders?.length || 0 }
+      counts: { 
+        positions: positions?.length || 0, 
+        orders: orders?.length || 0 
+      },
+      accountState: account.state,
+      connectionStatus: account.connectionStatus
     });
   } catch (err) {
     console.error('Account metrics error:', err);
-    return res.status(400).json({ ok:false, error: String(err && err.message ? err.message : err) });
+    return res.status(400).json({ 
+      ok:false, 
+      error: String(err && err.message ? err.message : err),
+      details: err.name || 'Unknown error',
+      suggestion: 'If account was just created, wait a few minutes for it to fully initialize'
+    });
   }
 });
 
