@@ -339,90 +339,46 @@ app.post('/api/create-copy-link', async (req, res) => {
 
     console.log('Configuration API found:', typeof configurationApi);
 
-    // Direct REST API call voor subscriber creation als SDK niet werkt
+    // Direct subscriber configuration creation
     try {
-      const subscriberResponse = await fetch(`https://copyfactory-api-v1.agiliumtrade.agiliumtrade.ai/users/current/subscribers`, {
-        method: 'GET',
+      const subscriberConfigResponse = await fetch(`https://copyfactory-api-v1.london.agiliumtrade.agiliumtrade.ai/users/current/configuration/subscribers/${accountId}`, {
+        method: 'PUT',
         headers: {
           'auth-token': TOKEN,
           'Content-Type': 'application/json'
-        }
+        },
+        body: JSON.stringify({
+          name: `${accountId}-subscriber`,
+          subscriptions: [{
+            strategyId: STRATEGY,
+            multiplier: multiplier
+          }]
+        })
       });
 
-      if (subscriberResponse.ok) {
-        const subscribers = await subscriberResponse.json();
-        console.log('Existing subscribers:', subscribers.length);
-        
-        // Check of subscriber al bestaat
-        let subscriberExists = subscribers.some(sub => sub.accountId === accountId);
-        
-        if (!subscriberExists) {
-          // Maak nieuwe subscriber
-          const createResponse = await fetch(`https://copyfactory-api-v1.agiliumtrade.agiliumtrade.ai/users/current/subscribers`, {
-            method: 'POST',
-            headers: {
-              'auth-token': TOKEN,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              name: `${accountId}-subscriber`,
-              accountId: accountId
-            })
-          });
-
-          if (!createResponse.ok) {
-            const errorText = await createResponse.text();
-            throw new Error(`Failed to create subscriber: ${createResponse.status} - ${errorText}`);
-          }
-
-          const newSubscriber = await createResponse.json();
-          console.log('Created subscriber:', newSubscriber);
-        }
-
-        // Maak subscription naar strategy
-        const subscriptionResponse = await fetch(`https://copyfactory-api-v1.agiliumtrade.agiliumtrade.ai/users/current/subscribers/${accountId}/subscriptions`, {
-          method: 'PUT',
-          headers: {
-            'auth-token': TOKEN,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify([{
-            strategyId: STRATEGY,
-            tradeSizeScaling: {
-              mode: 'balance',
-              baseBalance: 1000,
-              targetBalance: multiplier * 1000
-            }
-          }])
-        });
-
-        if (!subscriptionResponse.ok) {
-          const errorText = await subscriptionResponse.text();
-          throw new Error(`Failed to create subscription: ${subscriptionResponse.status} - ${errorText}`);
-        }
-
-        const subscription = await subscriptionResponse.json();
-        console.log('Created subscription:', subscription);
-
-        return res.json({
-          ok: true,
-          subscriberId: accountId,
-          strategyId: STRATEGY,
-          multiplier,
-          message: 'Copy trading setup completed successfully using direct API'
-        });
-
-      } else {
-        throw new Error(`Failed to fetch subscribers: ${subscriberResponse.status}`);
+      if (!subscriberConfigResponse.ok) {
+        const errorText = await subscriberConfigResponse.text();
+        throw new Error(`Failed to create subscriber configuration: ${subscriberConfigResponse.status} - ${errorText}`);
       }
 
-    } catch (directApiError) {
-      console.error('Direct API approach failed:', directApiError.message);
+      const subscriberConfig = await subscriberConfigResponse.json();
+      console.log('Created subscriber configuration:', subscriberConfig);
+
+      return res.json({
+        ok: true,
+        subscriberId: accountId,
+        strategyId: STRATEGY,
+        multiplier,
+        message: 'Copy trading setup completed successfully'
+      });
+
+    } catch (configError) {
+      console.error('Subscriber configuration failed:', configError.message);
       
       return res.status(400).json({
         ok: false,
         error: 'Failed to setup copy trading',
-        details: directApiError.message,
+        details: configError.message,
         suggestion: 'Check if account has SUBSCRIBER role and strategy ID is valid'
       });
     }
