@@ -14,7 +14,7 @@ const app = express();
 app.use(express.json());
 
 // === ENV ===
-const TOKEN = process.env.META_API_TOKEN;                // AANGEPAST: was METAAPI_TOKEN
+const TOKEN = process.env.METAAPI_TOKEN;            // AANGEPAST: was METAAPI_TOKEN
 const REGION = process.env.METAAPI_REGION || 'london';   // 'london'
 const STRATEGY = process.env.PROVIDER_STRATEGY_ID || '3DvG';
 
