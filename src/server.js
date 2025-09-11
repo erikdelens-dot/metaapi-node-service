@@ -264,50 +264,149 @@ app.post('/api/create-copy-link', async (req, res) => {
   if (!TOKEN) return res.status(500).json({ ok:false, error:'METAAPI_TOKEN missing' });
 
   try {
-    // CopyFactory met CORRECTE domain
-    const cf = new CopyFactory(TOKEN, { domain: `agiliumtrade.agiliumtrade.ai` });
+    // Debug SDK imports
+    console.log('MetaApiSdk:', typeof MetaApiSdk);
+    console.log('CopyFactory:', typeof CopyFactory);
+    console.log('CopyFactory available:', !!CopyFactory);
+    
+    // Probeer verschillende CopyFactory initialisatie methoden
+    let copyFactory;
+    
+    try {
+      // Methode 1: Direct import
+      copyFactory = new CopyFactory(TOKEN, {
+        domain: 'agiliumtrade.agiliumtrade.ai'
+      });
+      console.log('CopyFactory created with method 1');
+    } catch (err1) {
+      console.log('Method 1 failed:', err1.message);
+      
+      try {
+        // Methode 2: Via MetaApiSdk
+        copyFactory = new MetaApiSdk.CopyFactory(TOKEN, {
+          domain: 'agiliumtrade.agiliumtrade.ai'
+        });
+        console.log('CopyFactory created with method 2');
+      } catch (err2) {
+        console.log('Method 2 failed:', err2.message);
+        
+        try {
+          // Methode 3: Default import
+          const { default: DefaultCopyFactory } = MetaApiSdk;
+          copyFactory = new DefaultCopyFactory.CopyFactory(TOKEN, {
+            domain: 'agiliumtrade.agiliumtrade.ai'
+          });
+          console.log('CopyFactory created with method 3');
+        } catch (err3) {
+          console.log('Method 3 failed:', err3.message);
+          
+          return res.status(500).json({
+            ok: false,
+            error: 'Failed to initialize CopyFactory',
+            attempts: [err1.message, err2.message, err3.message],
+            availableExports: Object.keys(MetaApiSdk)
+          });
+        }
+      }
+    }
 
-    // 1) Zorg dat er een subscriber is
+    // Debug CopyFactory object
+    console.log('CopyFactory object keys:', Object.keys(copyFactory));
+    console.log('subscriberApi available:', !!copyFactory.subscriberApi);
+    
+    // Check of subscriberApi bestaat
+    if (!copyFactory.subscriberApi) {
+      return res.status(500).json({ 
+        ok: false, 
+        error: 'CopyFactory subscriberApi not available',
+        available: Object.keys(copyFactory),
+        cfType: typeof copyFactory
+      });
+    }
+
+    // Test basic subscriber operations
     let subscriberExists = false;
     try {
-      await cf.subscriberApi.getSubscriber(accountId);
+      const existingSubscriber = await copyFactory.subscriberApi.getSubscriber(accountId);
       subscriberExists = true;
-    } catch (_) {
-      console.log('Subscriber does not exist, creating new one');
+      console.log('Subscriber exists:', existingSubscriber);
+    } catch (err) {
+      console.log('Subscriber does not exist, will create new one:', err.message);
     }
 
     if (!subscriberExists) {
-      await cf.subscriberApi.createSubscriber({
-        id: accountId,
-        name: `${accountId}-subscriber`,
-        accounts: [{ id: accountId }]
-      });
-    } else {
-      await cf.subscriberApi.updateSubscriber(accountId, {
-        name: `${accountId}-subscriber`,
-        accounts: [{ id: accountId }]
-      });
-    }
-
-    // 2) Subscription instellen naar onze strategie
-    await cf.subscriberApi.updateSubscriptions(accountId, [{
-      strategyId: STRATEGY,
-      tradeSizeScaling: {
-        mode: 'balance',
-        baseBalance: 1000,
-        targetBalance: multiplier * 1000
+      try {
+        const newSubscriber = await copyFactory.subscriberApi.createSubscriber({
+          id: accountId,
+          name: `${accountId}-subscriber`,
+          accounts: [{ id: accountId }]
+        });
+        console.log('Created subscriber:', newSubscriber);
+      } catch (createErr) {
+        console.error('Failed to create subscriber:', createErr);
+        return res.status(400).json({
+          ok: false,
+          error: 'Failed to create subscriber',
+          details: createErr.message
+        });
       }
-    }]);
-
-    // 3) Mirror open trades
-    if (mirrorOpenTrades) {
-      await cf.subscriberApi.resynchronize(accountId);
+    } else {
+      try {
+        await copyFactory.subscriberApi.updateSubscriber(accountId, {
+          name: `${accountId}-subscriber`,
+          accounts: [{ id: accountId }]
+        });
+        console.log('Updated existing subscriber');
+      } catch (updateErr) {
+        console.warn('Failed to update subscriber, continuing anyway:', updateErr.message);
+      }
     }
 
-    return res.json({ ok:true, subscriberId: accountId, strategyId: STRATEGY, multiplier, mirrored: mirrorOpenTrades });
+    // Subscription instellen
+    try {
+      await copyFactory.subscriberApi.updateSubscriptions(accountId, [{
+        strategyId: STRATEGY,
+        tradeSizeScaling: {
+          mode: 'balance',
+          baseBalance: 1000,
+          targetBalance: multiplier * 1000
+        }
+      }]);
+      console.log('Subscription created successfully');
+    } catch (subErr) {
+      console.error('Failed to create subscription:', subErr);
+      return res.status(400).json({
+        ok: false,
+        error: 'Failed to create subscription',
+        details: subErr.message
+      });
+    }
+
+    // Mirror open trades
+    if (mirrorOpenTrades) {
+      try {
+        await copyFactory.subscriberApi.resynchronize(accountId);
+        console.log('Resynchronization triggered');
+      } catch (resyncErr) {
+        console.warn('Resync failed, but continuing:', resyncErr.message);
+      }
+    }
+
+    return res.json({ 
+      ok: true, 
+      subscriberId: accountId, 
+      strategyId: STRATEGY, 
+      multiplier, 
+      mirrored: mirrorOpenTrades,
+      message: 'Copy trading setup completed successfully'
+    });
   } catch (err) {
     console.error('Copy link error:', err);
-    return res.status(400).json({ ok:false, error: String(err && err.message ? err.message : err) });
+    return res.status(400).json({ 
+      ok: false, 
+      error: String(err.message || err),
+      stack: err.stack ? err.stack.split('\n').slice(0, 5) : undefined
+    });
   }
 });
 
