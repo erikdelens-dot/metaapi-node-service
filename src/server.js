@@ -264,148 +264,143 @@ app.post('/api/create-copy-link', async (req, res) => {
   if (!TOKEN) return res.status(500).json({ ok:false, error:'METAAPI_TOKEN missing' });
 
   try {
-    // Debug SDK imports
-    console.log('MetaApiSdk:', typeof MetaApiSdk);
-    console.log('CopyFactory:', typeof CopyFactory);
-    console.log('CopyFactory available:', !!CopyFactory);
+    // Check of account SUBSCRIBER role heeft
+    const api = new MetaApi(TOKEN, { domain: `agiliumtrade.agiliumtrade.ai` });
+    const account = await api.metatraderAccountApi.getAccount(accountId);
     
-    // Probeer verschillende CopyFactory initialisatie methoden
-    let copyFactory;
-    
-    try {
-      // Methode 1: Direct import
-      copyFactory = new CopyFactory(TOKEN, {
-        domain: 'agiliumtrade.agiliumtrade.ai'
-      });
-      console.log('CopyFactory created with method 1');
-    } catch (err1) {
-      console.log('Method 1 failed:', err1.message);
-      
-      try {
-        // Methode 2: Via MetaApiSdk
-        copyFactory = new MetaApiSdk.CopyFactory(TOKEN, {
-          domain: 'agiliumtrade.agiliumtrade.ai'
-        });
-        console.log('CopyFactory created with method 2');
-      } catch (err2) {
-        console.log('Method 2 failed:', err2.message);
-        
-        try {
-          // Methode 3: Default import
-          const { default: DefaultCopyFactory } = MetaApiSdk;
-          copyFactory = new DefaultCopyFactory.CopyFactory(TOKEN, {
-            domain: 'agiliumtrade.agiliumtrade.ai'
-          });
-          console.log('CopyFactory created with method 3');
-        } catch (err3) {
-          console.log('Method 3 failed:', err3.message);
-          
-          return res.status(500).json({
-            ok: false,
-            error: 'Failed to initialize CopyFactory',
-            attempts: [err1.message, err2.message, err3.message],
-            availableExports: Object.keys(MetaApiSdk)
-          });
-        }
-      }
-    }
-
-    // Debug CopyFactory object
-    console.log('CopyFactory object keys:', Object.keys(copyFactory));
-    console.log('subscriberApi available:', !!copyFactory.subscriberApi);
-    
-    // Check of subscriberApi bestaat
-    if (!copyFactory.subscriberApi) {
-      return res.status(500).json({ 
-        ok: false, 
-        error: 'CopyFactory subscriberApi not available',
-        available: Object.keys(copyFactory),
-        cfType: typeof copyFactory
-      });
-    }
-
-    // Test basic subscriber operations
-    let subscriberExists = false;
-    try {
-      const existingSubscriber = await copyFactory.subscriberApi.getSubscriber(accountId);
-      subscriberExists = true;
-      console.log('Subscriber exists:', existingSubscriber);
-    } catch (err) {
-      console.log('Subscriber does not exist, will create new one:', err.message);
-    }
-
-    if (!subscriberExists) {
-      try {
-        const newSubscriber = await copyFactory.subscriberApi.createSubscriber({
-          id: accountId,
-          name: `${accountId}-subscriber`,
-          accounts: [{ id: accountId }]
-        });
-        console.log('Created subscriber:', newSubscriber);
-      } catch (createErr) {
-        console.error('Failed to create subscriber:', createErr);
-        return res.status(400).json({
-          ok: false,
-          error: 'Failed to create subscriber',
-          details: createErr.message
-        });
-      }
-    } else {
-      try {
-        await copyFactory.subscriberApi.updateSubscriber(accountId, {
-          name: `${accountId}-subscriber`,
-          accounts: [{ id: accountId }]
-        });
-        console.log('Updated existing subscriber');
-      } catch (updateErr) {
-        console.warn('Failed to update subscriber, continuing anyway:', updateErr.message);
-      }
-    }
-
-    // Subscription instellen
-    try {
-      await copyFactory.subscriberApi.updateSubscriptions(accountId, [{
-        strategyId: STRATEGY,
-        tradeSizeScaling: {
-          mode: 'balance',
-          baseBalance: 1000,
-          targetBalance: multiplier * 1000
-        }
-      }]);
-      console.log('Subscription created successfully');
-    } catch (subErr) {
-      console.error('Failed to create subscription:', subErr);
+    // Update account om SUBSCRIBER rol toe te voegen
+    if (!account.copyFactoryRoles || !account.copyFactoryRoles.includes('SUBSCRIBER')) {
+      console.log('Adding SUBSCRIBER role to account');
+      // Account moet SUBSCRIBER rol hebben voor copy trading
       return res.status(400).json({
         ok: false,
-        error: 'Failed to create subscription',
-        details: subErr.message
+        error: 'Account must have SUBSCRIBER copyFactoryRoles. Please add this via MetaApi dashboard.',
+        accountId,
+        currentRoles: account.copyFactoryRoles || []
       });
     }
 
-    // Mirror open trades
-    if (mirrorOpenTrades) {
-      try {
-        await copyFactory.subscriberApi.resynchronize(accountId);
-        console.log('Resynchronization triggered');
-      } catch (resyncErr) {
-        console.warn('Resync failed, but continuing:', resyncErr.message);
-      }
+    // CopyFactory met juiste initialisatie
+    const copyFactory = new CopyFactory(TOKEN, {
+      domain: 'agiliumtrade.agiliumtrade.ai'
+    });
+
+    console.log('CopyFactory initialized, available properties:', Object.keys(copyFactory));
+
+    // Check welke API's beschikbaar zijn
+    const availableApis = Object.keys(copyFactory).filter(key => 
+      key.includes('Api') || key.includes('api')
+    );
+    console.log('Available APIs:', availableApis);
+
+    // Probeer verschillende API endpoints
+    let configurationApi = copyFactory.configurationApi || copyFactory.configApi || copyFactory._configurationClient;
+    
+    if (!configurationApi) {
+      return res.status(500).json({
+        ok: false,
+        error: 'CopyFactory configuration API not found',
+        available: Object.keys(copyFactory),
+        availableApis
+      });
     }
 
-    return res.json({ 
-      ok: true, 
-      subscriberId: accountId, 
-      strategyId: STRATEGY, 
-      multiplier, 
-      mirrored: mirrorOpenTrades,
-      message: 'Copy trading setup completed successfully'
-    });
+    console.log('Configuration API found:', typeof configurationApi);
+
+    // Direct REST API call voor subscriber creation als SDK niet werkt
+    try {
+      const subscriberResponse = await fetch(`https://copyfactory-api-v1.agiliumtrade.agiliumtrade.ai/users/current/subscribers`, {
+        method: 'GET',
+        headers: {
+          'auth-token': TOKEN,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (subscriberResponse.ok) {
+        const subscribers = await subscriberResponse.json();
+        console.log('Existing subscribers:', subscribers.length);
+        
+        // Check of subscriber al bestaat
+        let subscriberExists = subscribers.some(sub => sub.accountId === accountId);
+        
+        if (!subscriberExists) {
+          // Maak nieuwe subscriber
+          const createResponse = await fetch(`https://copyfactory-api-v1.agiliumtrade.agiliumtrade.ai/users/current/subscribers`, {
+            method: 'POST',
+            headers: {
+              'auth-token': TOKEN,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              name: `${accountId}-subscriber`,
+              accountId: accountId
+            })
+          });
+
+          if (!createResponse.ok) {
+            const errorText = await createResponse.text();
+            throw new Error(`Failed to create subscriber: ${createResponse.status} - ${errorText}`);
+          }
+
+          const newSubscriber = await createResponse.json();
+          console.log('Created subscriber:', newSubscriber);
+        }
+
+        // Maak subscription naar strategy
+        const subscriptionResponse = await fetch(`https://copyfactory-api-v1.agiliumtrade.agiliumtrade.ai/users/current/subscribers/${accountId}/subscriptions`, {
+          method: 'PUT',
+          headers: {
+            'auth-token': TOKEN,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify([{
+            strategyId: STRATEGY,
+            tradeSizeScaling: {
+              mode: 'balance',
+              baseBalance: 1000,
+              targetBalance: multiplier * 1000
+            }
+          }])
+        });
+
+        if (!subscriptionResponse.ok) {
+          const errorText = await subscriptionResponse.text();
+          throw new Error(`Failed to create subscription: ${subscriptionResponse.status} - ${errorText}`);
+        }
+
+        const subscription = await subscriptionResponse.json();
+        console.log('Created subscription:', subscription);
+
+        return res.json({
+          ok: true,
+          subscriberId: accountId,
+          strategyId: STRATEGY,
+          multiplier,
+          message: 'Copy trading setup completed successfully using direct API'
+        });
+
+      } else {
+        throw new Error(`Failed to fetch subscribers: ${subscriberResponse.status}`);
+      }
+
+    } catch (directApiError) {
+      console.error('Direct API approach failed:', directApiError.message);
+      
+      return res.status(400).json({
+        ok: false,
+        error: 'Failed to setup copy trading',
+        details: directApiError.message,
+        suggestion: 'Check if account has SUBSCRIBER role and strategy ID is valid'
+      });
+    }
+
   } catch (err) {
     console.error('Copy link error:', err);
     return res.status(400).json({ 
       ok: false, 
       error: String(err.message || err),
-      stack: err.stack ? err.stack.split('\n').slice(0, 5) : undefined
+      stack: err.stack ? err.stack.split('\n').slice(0, 3) : undefined
     });
   }
 });
