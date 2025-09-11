@@ -25,6 +25,18 @@ if (!TOKEN) {
 // SSL certificaat fix voor Vercel
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
+// EXTRA TLS FIXES voor Node.js fetch
+const https = require('https');
+const originalFetch = global.fetch;
+global.fetch = (url, options = {}) => {
+  if (url.includes('agiliumtrade.ai')) {
+    options.agent = new https.Agent({
+      rejectUnauthorized: false
+    });
+  }
+  return originalFetch(url, options);
+};
+
 // NIEUW: Test je token eerst
 async function testMetaApiToken() {
   if (!TOKEN) return false;
