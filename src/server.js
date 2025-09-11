@@ -1,6 +1,3 @@
-// Laad .env variabelen
-require('dotenv').config();
-
 // Node API-service die MetaApi aanroept met de officiële SDK.
 // Endpoints:
 //  - POST /api/link-account        { brokerServer, login, password, dryRun? }
