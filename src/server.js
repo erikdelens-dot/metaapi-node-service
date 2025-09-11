@@ -14,19 +14,57 @@ const app = express();
 app.use(express.json());
 
 // === ENV ===
-const TOKEN = process.env.METAAPI_TOKEN;            // AANGEPAST: was METAAPI_TOKEN
-const REGION = process.env.METAAPI_REGION || 'london';   // 'london'
+const TOKEN = process.env.METAAPI_TOKEN;
+const REGION = process.env.METAAPI_REGION || 'london';
 const STRATEGY = process.env.PROVIDER_STRATEGY_ID || '3DvG';
 
 if (!TOKEN) {
-  console.warn('⚠️  META_API_TOKEN is missing. Set it in your hosting env.');
+  console.warn('⚠️  METAAPI_TOKEN is missing. Set it in your hosting env.');
 }
 
 // SSL certificaat fix voor Vercel
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-// Health
-app.get('/api/health', (_, res) => res.json({ ok: true }));
+// NIEUW: Test je token eerst
+async function testMetaApiToken() {
+  if (!TOKEN) return false;
+  
+  try {
+    const response = await fetch(`https://mt-provisioning-api-london.agiliumtrade.ai/users/current/accounts`, {
+      method: 'GET',
+      headers: {
+        'auth-token': TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    console.log('MetaApi token test response:', response.status);
+    return response.status !== 401 && response.status !== 403;
+  } catch (err) {
+    console.error('MetaApi token test failed:', err.message);
+    return false;
+  }
+}
+
+// Test token bij startup
+testMetaApiToken().then(valid => {
+  if (valid) {
+    console.log('✅ MetaApi token is valid');
+  } else {
+    console.log('❌ MetaApi token is invalid or missing');
+  }
+});
+
+// Health + token test
+app.get('/api/health', async (_, res) => {
+  const tokenValid = await testMetaApiToken();
+  return res.json({ 
+    ok: true, 
+    tokenValid,
+    region: REGION,
+    hasToken: !!TOKEN 
+  });
+});
 
 /**
  * POST /api/link-account
@@ -38,45 +76,66 @@ app.post('/api/link-account', async (req, res) => {
   if (!brokerServer || !login || !password) {
     return res.status(400).json({ ok:false, error:'Missing fields: brokerServer, login, password' });
   }
-  if (!TOKEN) return res.status(500).json({ ok:false, error:'META_API_TOKEN missing' });
+  if (!TOKEN) return res.status(500).json({ ok:false, error:'METAAPI_TOKEN missing' });
 
   try {
-    // AANGEPAST: Correcte domain format
-    const api = new MetaApi(TOKEN, { domain: `${REGION}.agiliumtrade.ai` });
-
-    // 1) Create account (application=CopyFactory i.v.m. copytrading)
-    const account = await api.metatraderAccountApi.createAccount({
-      name: `${login}@${brokerServer}`,  // AANGEPAST: betere naming
-      type: 'cloud',
-      region: REGION,
-      platform: 'mt5',
-      server: brokerServer,   // "NagaMarkets-Demo" of "NagaMarkets-Live"
-      login: login.toString(), // AANGEPAST: zorg dat het een string is
-      password,               // MASTER password (géén investor)
-      application: 'CopyFactory'
+    // DIRECT API CALL - ZONDER SDK
+    const createAccountResponse = await fetch(`https://mt-provisioning-api-london.agiliumtrade.ai/users/current/accounts`, {
+      method: 'POST',
+      headers: {
+        'auth-token': TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: `${login}@${brokerServer}`,
+        type: 'cloud',
+        region: REGION,
+        platform: 'mt5',
+        server: brokerServer,
+        login: login.toString(),
+        password,
+        application: 'CopyFactory'
+      })
     });
 
-    // 2) Deploy & wachten tot CONNECTED
-    await account.deploy();
-    
-    // AANGEPAST: Voeg timeout toe voor waitConnected
-    const connectPromise = account.waitConnected();
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Connection timeout after 60 seconds')), 60000)
-    );
-    
-    await Promise.race([connectPromise, timeoutPromise]);
+    if (!createAccountResponse.ok) {
+      const errorText = await createAccountResponse.text();
+      throw new Error(`Create account failed: ${createAccountResponse.status} - ${errorText}`);
+    }
+
+    const accountData = await createAccountResponse.json();
+    const accountId = accountData.id;
+
+    // Deploy account
+    const deployResponse = await fetch(`https://mt-provisioning-api-london.agiliumtrade.ai/users/current/accounts/${accountId}/deploy`, {
+      method: 'POST',
+      headers: {
+        'auth-token': TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!deployResponse.ok) {
+      const errorText = await deployResponse.text();
+      throw new Error(`Deploy failed: ${deployResponse.status} - ${errorText}`);
+    }
 
     if (dryRun) {
       // Test verbinding: opruimen na succesvolle check
-      await account.remove();
+      await fetch(`https://mt-provisioning-api-london.agiliumtrade.ai/users/current/accounts/${accountId}`, {
+        method: 'DELETE',
+        headers: {
+          'auth-token': TOKEN,
+          'Content-Type': 'application/json'
+        }
+      });
       return res.json({ ok:true, dryRun:true });
     }
 
-    return res.json({ ok:true, accountId: account.id, region: REGION });
+    return res.json({ ok:true, accountId, region: REGION });
   } catch (err) {
     const message = String(err && err.message ? err.message : err);
-    console.error('Link account error:', message); // AANGEPAST: logging toegevoegd
+    console.error('Link account error:', message);
     return res.status(400).json({ ok:false, error: message });
   }
 });
@@ -88,13 +147,12 @@ app.post('/api/link-account', async (req, res) => {
 app.get('/api/account-metrics', async (req, res) => {
   const id = req.query.id;
   if (!id) return res.status(400).json({ ok:false, error:'Missing id' });
-  if (!TOKEN) return res.status(500).json({ ok:false, error:'META_API_TOKEN missing' });
+  if (!TOKEN) return res.status(500).json({ ok:false, error:'METAAPI_TOKEN missing' });
 
   try {
     const api = new MetaApi(TOKEN, { domain: `${REGION}.agiliumtrade.ai` });
     const account = await api.metatraderAccountApi.getAccount(id);
     
-    // AANGEPAST: Check account status eerst
     if (account.state !== 'DEPLOYED') {
       return res.status(400).json({ ok:false, error:'Account not deployed' });
     }
@@ -111,7 +169,7 @@ app.get('/api/account-metrics', async (req, res) => {
       counts: { positions: positions?.length || 0, orders: orders?.length || 0 }
     });
   } catch (err) {
-    console.error('Account metrics error:', err); // AANGEPAST: logging toegevoegd
+    console.error('Account metrics error:', err);
     return res.status(400).json({ ok:false, error: String(err && err.message ? err.message : err) });
   }
 });
@@ -124,13 +182,12 @@ app.get('/api/account-metrics', async (req, res) => {
 app.post('/api/create-copy-link', async (req, res) => {
   const { accountId, multiplier = 1.0, mirrorOpenTrades = true } = req.body || {};
   if (!accountId) return res.status(400).json({ ok:false, error:'Missing accountId' });
-  if (!TOKEN) return res.status(500).json({ ok:false, error:'META_API_TOKEN missing' });
+  if (!TOKEN) return res.status(500).json({ ok:false, error:'METAAPI_TOKEN missing' });
 
   try {
-    // AANGEPAST: Correcte domain format voor CopyFactory
     const cf = new CopyFactory(TOKEN, { domain: `${REGION}.agiliumtrade.ai` });
 
-    // 1) Zorg dat er een subscriber is (per SDK-versie kan dit iets verschillen)
+    // 1) Zorg dat er een subscriber is
     let subscriberExists = false;
     try {
       await cf.subscriberApi.getSubscriber(accountId);
@@ -152,10 +209,9 @@ app.post('/api/create-copy-link', async (req, res) => {
       });
     }
 
-    // 2) Subscription instellen naar onze strategie met scale-by-equity
+    // 2) Subscription instellen naar onze strategie
     await cf.subscriberApi.updateSubscriptions(accountId, [{
       strategyId: STRATEGY,
-      // AANGEPAST: Modernere syntax voor risk scaling
       tradeSizeScaling: {
         mode: 'balance',
         baseBalance: 1000,
@@ -170,7 +226,7 @@ app.post('/api/create-copy-link', async (req, res) => {
 
     return res.json({ ok:true, subscriberId: accountId, strategyId: STRATEGY, multiplier, mirrored: mirrorOpenTrades });
   } catch (err) {
-    console.error('Copy link error:', err); // AANGEPAST: logging toegevoegd
+    console.error('Copy link error:', err);
     return res.status(400).json({ ok:false, error: String(err && err.message ? err.message : err) });
   }
 });
