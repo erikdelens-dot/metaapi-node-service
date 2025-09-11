@@ -28,16 +28,8 @@ if (!TOKEN) {
 // SSL certificaat fix voor Vercel
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-// Health + token test
-app.get('/api/health', async (_, res) => {
-  const tokenValid = await testMetaApiToken();
-  return res.json({ 
-    ok: true, 
-    tokenValid,
-    region: REGION,
-    hasToken: !!TOKEN 
-  });
-});
+// Health
+app.get('/api/health', (_, res) => res.json({ ok: true }));
 
 /**
  * POST /api/link-account
@@ -49,66 +41,45 @@ app.post('/api/link-account', async (req, res) => {
   if (!brokerServer || !login || !password) {
     return res.status(400).json({ ok:false, error:'Missing fields: brokerServer, login, password' });
   }
-  if (!TOKEN) return res.status(500).json({ ok:false, error:'METAAPI_TOKEN missing' });
+  if (!TOKEN) return res.status(500).json({ ok:false, error:'META_API_TOKEN missing' });
 
   try {
-    // DIRECT API CALL - ZONDER v1
-    const createAccountResponse = await fetch(`https://mt-provisioning-api-london.agiliumtrade.ai/users/current/accounts`, {
-      method: 'POST',
-      headers: {
-        'auth-token': TOKEN,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        name: `${login}@${brokerServer}`,
-        type: 'cloud',
-        region: REGION,
-        platform: 'mt5',
-        server: brokerServer,
-        login: login.toString(),
-        password,
-        application: 'CopyFactory'
-      })
+    // AANGEPAST: Correcte domain format
+    const api = new MetaApi(TOKEN, { domain: `${REGION}.agiliumtrade.ai` });
+
+    // 1) Create account (application=CopyFactory i.v.m. copytrading)
+    const account = await api.metatraderAccountApi.createAccount({
+      name: `${login}@${brokerServer}`,  // AANGEPAST: betere naming
+      type: 'cloud',
+      region: REGION,
+      platform: 'mt5',
+      server: brokerServer,   // "NagaMarkets-Demo" of "NagaMarkets-Live"
+      login: login.toString(), // AANGEPAST: zorg dat het een string is
+      password,               // MASTER password (géén investor)
+      application: 'CopyFactory'
     });
 
-    if (!createAccountResponse.ok) {
-      const errorText = await createAccountResponse.text();
-      throw new Error(`Create account failed: ${createAccountResponse.status} - ${errorText}`);
-    }
-
-    const accountData = await createAccountResponse.json();
-    const accountId = accountData.id;
-
-    // Deploy account - ZONDER v1
-    const deployResponse = await fetch(`https://mt-provisioning-api-london.agiliumtrade.ai/users/current/accounts/${accountId}/deploy`, {
-      method: 'POST',
-      headers: {
-        'auth-token': TOKEN,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (!deployResponse.ok) {
-      const errorText = await deployResponse.text();
-      throw new Error(`Deploy failed: ${deployResponse.status} - ${errorText}`);
-    }
+    // 2) Deploy & wachten tot CONNECTED
+    await account.deploy();
+    
+    // AANGEPAST: Voeg timeout toe voor waitConnected
+    const connectPromise = account.waitConnected();
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Connection timeout after 60 seconds')), 60000)
+    );
+    
+    await Promise.race([connectPromise, timeoutPromise]);
 
     if (dryRun) {
-      // Test verbinding: opruimen na succesvolle check - ZONDER v1
-      await fetch(`https://mt-provisioning-api-london.agiliumtrade.ai/users/current/accounts/${accountId}`, {
-        method: 'DELETE',
-        headers: {
-          'auth-token': TOKEN,
-          'Content-Type': 'application/json'
-        }
-      });
+      // Test verbinding: opruimen na succesvolle check
+      await account.remove();
       return res.json({ ok:true, dryRun:true });
     }
 
-    return res.json({ ok:true, accountId, region: REGION });
+    return res.json({ ok:true, accountId: account.id, region: REGION });
   } catch (err) {
     const message = String(err && err.message ? err.message : err);
-    console.error('Link account error:', message);
+    console.error('Link account error:', message); // AANGEPAST: logging toegevoegd
     return res.status(400).json({ ok:false, error: message });
   }
 });
