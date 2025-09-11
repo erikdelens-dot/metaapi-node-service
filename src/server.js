@@ -37,12 +37,12 @@ global.fetch = (url, options = {}) => {
   return originalFetch(url, options);
 };
 
-// Token validatie functie
+// Token validatie functie met CORRECTE URL
 async function testMetaApiToken() {
   if (!TOKEN) return false;
   
   try {
-    const response = await fetch(`https://mt-provisioning-api-v1.london.agiliumtrade.ai/users/current/accounts`, {
+    const response = await fetch(`https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai/users/current/accounts`, {
       method: 'GET',
       headers: {
         'auth-token': TOKEN,
@@ -91,8 +91,8 @@ app.post('/api/link-account', async (req, res) => {
   if (!TOKEN) return res.status(500).json({ ok:false, error:'METAAPI_TOKEN missing' });
 
   try {
-    // DIRECT API CALL met correcte v1 URL
-    const createAccountResponse = await fetch(`https://mt-provisioning-api-v1.london.agiliumtrade.ai/users/current/accounts`, {
+    // DIRECT API CALL met CORRECTE URL en vereiste velden
+    const createAccountResponse = await fetch(`https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai/users/current/accounts`, {
       method: 'POST',
       headers: {
         'auth-token': TOKEN,
@@ -106,7 +106,9 @@ app.post('/api/link-account', async (req, res) => {
         server: brokerServer,
         login: login.toString(),
         password,
-        application: 'CopyFactory'
+        application: 'CopyFactory',
+        magic: Math.floor(Math.random() * 1000000), // Vereist veld volgens docs
+        keywords: [] // Optioneel maar soms vereist
       })
     });
 
@@ -118,8 +120,8 @@ app.post('/api/link-account', async (req, res) => {
     const accountData = await createAccountResponse.json();
     const accountId = accountData.id;
 
-    // Deploy account met v1 URL
-    const deployResponse = await fetch(`https://mt-provisioning-api-v1.london.agiliumtrade.ai/users/current/accounts/${accountId}/deploy`, {
+    // Deploy account met CORRECTE URL
+    const deployResponse = await fetch(`https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai/users/current/accounts/${accountId}/deploy`, {
       method: 'POST',
       headers: {
         'auth-token': TOKEN,
@@ -133,8 +135,8 @@ app.post('/api/link-account', async (req, res) => {
     }
 
     if (dryRun) {
-      // Test verbinding: opruimen na succesvolle check met v1 URL
-      await fetch(`https://mt-provisioning-api-v1.london.agiliumtrade.ai/users/current/accounts/${accountId}`, {
+      // Test verbinding: opruimen na succesvolle check met CORRECTE URL
+      await fetch(`https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai/users/current/accounts/${accountId}`, {
         method: 'DELETE',
         headers: {
           'auth-token': TOKEN,
@@ -162,7 +164,8 @@ app.get('/api/account-metrics', async (req, res) => {
   if (!TOKEN) return res.status(500).json({ ok:false, error:'METAAPI_TOKEN missing' });
 
   try {
-    const api = new MetaApi(TOKEN, { domain: `v1.london.agiliumtrade.ai` });
+    // SDK met CORRECTE domain
+    const api = new MetaApi(TOKEN, { domain: `agiliumtrade.agiliumtrade.ai` });
     const account = await api.metatraderAccountApi.getAccount(id);
     
     if (account.state !== 'DEPLOYED') {
@@ -197,7 +200,8 @@ app.post('/api/create-copy-link', async (req, res) => {
   if (!TOKEN) return res.status(500).json({ ok:false, error:'METAAPI_TOKEN missing' });
 
   try {
-    const cf = new CopyFactory(TOKEN, { domain: `v1.london.agiliumtrade.ai` });
+    // CopyFactory met CORRECTE domain
+    const cf = new CopyFactory(TOKEN, { domain: `agiliumtrade.agiliumtrade.ai` });
 
     // 1) Zorg dat er een subscriber is
     let subscriberExists = false;
