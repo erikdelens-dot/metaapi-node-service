@@ -273,14 +273,15 @@ app.post('/api/create-copy-link', async (req, res) => {
       console.log('Adding SUBSCRIBER role to account');
       
       try {
-        const updateResponse = await fetch(`https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai/users/current/accounts/${accountId}`, {
-          method: 'PUT',
+        const updateResponse = await fetch(`https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai/users/current/accounts/${accountId}/enable-copy-factory-api`, {
+          method: 'POST',
           headers: {
             'auth-token': TOKEN,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            copyFactoryRoles: ['SUBSCRIBER']
+            copyFactoryRoles: ['SUBSCRIBER'],
+            copyFactoryResourceSlots: 1
           })
         });
 
