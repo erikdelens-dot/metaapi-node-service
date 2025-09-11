@@ -339,9 +339,9 @@ app.post('/api/create-copy-link', async (req, res) => {
 
     console.log('Configuration API found:', typeof configurationApi);
 
-    // Direct subscriber configuration creation
+    // Direct subscriber configuration creation met CORRECTE URL
     try {
-      const subscriberConfigResponse = await fetch(`https://copyfactory-api-v1.london.agiliumtrade.agiliumtrade.ai/users/current/configuration/subscribers/${accountId}`, {
+      const subscriberConfigResponse = await fetch(`https://copyfactory-api-v1.london.agiliumtrade.ai/users/current/configuration/subscribers/${accountId}`, {
         method: 'PUT',
         headers: {
           'auth-token': TOKEN,
