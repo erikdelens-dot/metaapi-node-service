@@ -340,7 +340,7 @@ app.post('/api/subscriber/configure', async (req, res) => {
         subscriptions: [
           {
             strategyId,
-            tradeSizeScaling: { mode: 'equity', multiplier: Number(multiplier) }
+            tradeSizeScaling: { mode: 'equity' }
           }
         ]
       })
@@ -378,7 +378,7 @@ app.post('/api/copy/start', async (req, res) => {
         name: `${accountId}-subscriber`,
         subscriptions: [{
           strategyId,
-          tradeSizeScaling: { mode: 'equity', multiplier: Number(multiplier) }
+          tradeSizeScaling: { mode: 'equity' }
         }]
       })
     });
