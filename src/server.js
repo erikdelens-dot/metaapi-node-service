@@ -284,14 +284,14 @@ app.post('/api/copy/start', async (req, res) => {
     const strategyHint = strategy || STRAT;
     const strategyId = await resolveStrategyId(strategyHint);
 
-    // 3) upsert subscriber config met tradeSizeScaling.mode='equity'
+    // 3) upsert subscriber config - test zonder multiplier eerst
     const put = await fetch(`${CF}/users/current/configuration/subscribers/${accountId}`, {
       method: 'PUT', headers: h(),
       body: JSON.stringify({
         name: `${accountId}-subscriber`,
         subscriptions: [{
-          strategyId,
-          tradeSizeScaling: { mode: 'equity', multiplier }
+          strategyId
+          // Tijdelijk multiplier weglaten om validation error te debuggen
         }]
       })
     });
