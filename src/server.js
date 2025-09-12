@@ -21,13 +21,28 @@ const MetaApi = MetaApiSdk.default;
 const TOKEN   = process.env.METAAPI_TOKEN || '';
 const REGION  = process.env.METAAPI_REGION || 'london';
 const STRAT   = process.env.PROVIDER_STRATEGY_ID || '3DvG'; // mag naam/code/_id; we resolven naar _id
-const PROV    = `https://mt-provisioning-api-v1.${REGION}.agiliumtrade.ai`;
-const CLIENT  = `https://mt-client-api-v1.${REGION}.agiliumtrade.ai`;
-const CF      = `https://copyfactory-api-v1.${REGION}.agiliumtrade.ai`;
+const PROV    = `https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai`;
+const CLIENT  = `https://mt-client-api-v1.agiliumtrade.agiliumtrade.ai`;
+const CF      = `https://copyfactory-api-v1.london.agiliumtrade.ai`;
 
 if (!TOKEN) {
   console.warn('⚠️  METAAPI_TOKEN ontbreekt — voeg die toe in je env.');
 }
+
+// SSL certificaat fix voor Vercel
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+// EXTRA TLS FIXES voor Node.js fetch
+const https = require('https');
+const originalFetch = global.fetch;
+global.fetch = (url, options = {}) => {
+  if (url.includes('agiliumtrade.ai')) {
+    options.agent = new https.Agent({
+      rejectUnauthorized: false
+    });
+  }
+  return originalFetch(url, options);
+};
 
 const app = express();
 app.use(express.json());
@@ -64,7 +79,7 @@ async function resolveStrategyId(strategyMaybe) {
 
   // 2) Zo niet: lijst ophalen en matchen op _id, name, code
   const list = await fetch(`${CF}/users/current/configuration/strategies`, { headers: h() }).then(x => x.json());
-  const items = list.items || [];
+  const items = list || [];
   const hit = items.find(s => s._id === strategyMaybe || s.name === strategyMaybe || s.code === strategyMaybe);
   if (!hit) {
     throw new Error(`Strategy not found for '${strategyMaybe}'. Maak/zoek de strategy in CopyFactory en gebruik de _id.`);
@@ -92,7 +107,7 @@ async function ensureSubscriberRole(accountId) {
 
 app.get('/api/health', async (_req, res) => {
   try {
-    const r = await fetch(`${PROV}/users/current`, { headers: h() });
+    const r = await fetch(`${PROV}/users/current/accounts`, { headers: h() });
     res.json({
       ok: r.ok,
       status: r.status,
@@ -122,9 +137,15 @@ app.post('/api/link-account', async (req, res) => {
       method: 'POST', headers: h(),
       body: JSON.stringify({
         name: `${login}@${brokerServer}`,
+        type: 'cloud',
+        region: 'london',
         platform: 'mt5',
         server: brokerServer,
-        application: 'CopyFactory'
+        login: login.toString(),
+        password,
+        application: 'CopyFactory',
+        magic: Math.floor(Math.random() * 1000000),
+        keywords: []
       })
     });
     if (!create.ok) {
@@ -133,18 +154,7 @@ app.post('/api/link-account', async (req, res) => {
     const acc = await create.json();
     const id = acc.id;
 
-    // 2) Credentials
-    const cred = await fetch(`${PROV}/users/current/accounts/${id}/credentials`, {
-      method: 'PUT', headers: h(),
-      body: JSON.stringify({ login: String(login), password, type: 'master' })
-    });
-    if (!cred.ok) {
-      // opruimen
-      await fetch(`${PROV}/users/current/accounts/${id}`, { method: 'DELETE', headers: h() }).catch(() => {});
-      return res.status(400).json({ ok: false, step: 'credentials', status: cred.status, error: await cred.text() });
-    }
-
-    // 3) Deploy
+    // 2) Deploy
     const dep = await fetch(`${PROV}/users/current/accounts/${id}/deploy`, {
       method: 'POST', headers: h()
     });
@@ -153,12 +163,14 @@ app.post('/api/link-account', async (req, res) => {
       return res.status(400).json({ ok: false, step: 'deploy', status: dep.status, error: await dep.text() });
     }
 
-    // 4) Poll
-    const wait = await waitAccountConnected(id, 90000);
     if (dryRun) {
       // test: opruimen
       await fetch(`${PROV}/users/current/accounts/${id}`, { method: 'DELETE', headers: h() }).catch(() => {});
+      return res.json({ ok: true, dryRun: true });
     }
+
+    // 3) Poll voor connection
+    const wait = await waitAccountConnected(id, 90000);
     if (!wait.ok) {
       return res.status(400).json({ ok: false, step: 'poll', ...wait, accountId: id });
     }
@@ -180,7 +192,7 @@ app.get('/api/account-metrics', async (req, res) => {
   if (!TOKEN) return res.status(500).json({ ok: false, error: 'METAAPI_TOKEN missing' });
 
   try {
-    const api = new MetaApi(TOKEN, { domain: `agiliumtrade.agiliumtrade.ai` });
+    const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
     const account = await api.metatraderAccountApi.getAccount(id);
 
     // Staat & connectie check
@@ -200,8 +212,29 @@ app.get('/api/account-metrics', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Account connection timeout', state, connectionStatus: account.connectionStatus });
     }
 
-    const info = await account.getAccountInformation();
-    let positions = [], orders = [];
+    if (!account.getAccountInformation || typeof account.getAccountInformation !== 'function') {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'Account methods not available. Account may still be starting up.',
+        accountId: id,
+        state: account.state,
+        connectionStatus: account.connectionStatus,
+        suggestion: 'Wait a few minutes and try again'
+      });
+    }
+
+    let info, positions = [], orders = [];
+    try { 
+      info = await account.getAccountInformation(); 
+    } catch (infoErr) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'Failed to retrieve account information',
+        details: infoErr.message,
+        suggestion: 'Account may still be connecting. Try again in a few minutes.'
+      });
+    }
+    
     try { positions = await account.getPositions(); } catch {}
     try { orders = await account.getOrders(); } catch {}
 
@@ -258,8 +291,7 @@ app.post('/api/copy/start', async (req, res) => {
         name: `${accountId}-subscriber`,
         subscriptions: [{
           strategyId,
-          tradeSizeScaling: { mode: 'equity', multiplier } // ✅ juiste payload
-          // optioneel: symbolMapping, riskLimits, minTradeVolume, etc.
+          tradeSizeScaling: { mode: 'equity', multiplier }
         }]
       })
     });
@@ -340,10 +372,11 @@ app.get('/api/copy/diagnose', async (req, res) => {
         id: accountId,
         state: acc.state,
         connectionStatus: acc.connectionStatus,
-        copyFactoryRoles: acc.copyFactoryRoles
+        copyFactoryRoles: acc.copyFactoryRoles,
+        baseCurrency: acc.baseCurrency
       },
       strategyHint: strategy || STRAT,
-      strategyId,                       // null als niet resolvebaar; zie strategiesList
+      strategyId,
       subscriberConfig: subscriberCfg || null,
       strategies: strategiesList || undefined
     });
