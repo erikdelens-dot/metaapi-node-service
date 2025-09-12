@@ -3,9 +3,11 @@
  *
  * Endpoints:
  *  - GET  /api/health
- *  - POST /api/link-account              { brokerServer, login, password, dryRun? }
+ *  - POST /api/link-account              { brokerServer, login, password, dryRun?, baseCurrency?, copyFactoryRoles?, platform?, region?, application? }
  *  - GET  /api/account-metrics?id=<metaapiAccountId>
  *  - POST /api/copy/enable-subscriber    { accountId }
+ *  - POST /api/subscriber/configure      { accountId, strategyId, multiplier=1.0 }
+ *  - POST /api/strategy/create           { name, accountId, description?, riskLimits? }
  *  - POST /api/copy/start                { accountId, multiplier=1.0, mirrorOpenTrades=true, strategy? }
  *  - POST /api/copy/stop                 { accountId }
  *  - GET  /api/copy/diagnose             ?accountId=...&strategy=...
@@ -20,32 +22,39 @@ const MetaApi = MetaApiSdk.default;
 // === ENV / CONSTANTS ===
 const TOKEN   = process.env.METAAPI_TOKEN || '';
 const REGION  = process.env.METAAPI_REGION || 'london';
-const STRAT   = process.env.PROVIDER_STRATEGY_ID || '3DvG'; // mag naam/code/_id; we resolven naar _id
+const STRAT   = process.env.PROVIDER_STRATEGY_ID || '3DvG'; // mag _id, name of code; we resolven naar _id
 const PROV    = `https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai`;
 const CLIENT  = `https://mt-client-api-v1.agiliumtrade.agiliumtrade.ai`;
 const CF      = `https://copyfactory-api-v1.london.agiliumtrade.ai`;
+const INTERNAL_KEY = process.env.INTERNAL_API_KEY || '';
 
-if (!TOKEN) {
-  console.warn('⚠️  METAAPI_TOKEN ontbreekt — voeg die toe in je env.');
-}
+// Waarschuwing als token ontbreekt
+if (!TOKEN) console.warn('⚠️  METAAPI_TOKEN ontbreekt — voeg die toe in je env.');
 
-// SSL certificaat fix voor Vercel
+// SSL certificaat fix voor Vercel (Agiliumtrade certs kunnen streng staan)
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-
-// EXTRA TLS FIXES voor Node.js fetch
 const https = require('https');
 const originalFetch = global.fetch;
 global.fetch = (url, options = {}) => {
   if (url.includes('agiliumtrade.ai')) {
-    options.agent = new https.Agent({
-      rejectUnauthorized: false
-    });
+    options.agent = new https.Agent({ rejectUnauthorized: false });
   }
   return originalFetch(url, options);
 };
 
 const app = express();
 app.use(express.json());
+
+// (Optioneel) simpele header protectie voor alle POST routes
+app.use((req, res, next) => {
+  if (INTERNAL_KEY && req.method === 'POST') {
+    const k = req.headers['x-internal-key'];
+    if (k !== INTERNAL_KEY) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    }
+  }
+  next();
+});
 
 function h() {
   return { 'auth-token': TOKEN, 'Content-Type': 'application/json' };
@@ -71,7 +80,7 @@ async function waitAccountConnected(accountId, maxWaitMs = 90000) {
   return { ok: false, error: 'Timeout waiting for CONNECTED' };
 }
 
-/** Resolves echte strategyId (_id). STRAT kan _id, name of code zijn. */
+/** Resolve echte strategyId (_id). STRAT kan _id, name of code zijn. */
 async function resolveStrategyId(strategyMaybe) {
   // 1) Probeer direct als _id
   let r = await fetch(`${CF}/users/current/configuration/strategies/${encodeURIComponent(strategyMaybe)}`, { headers: h() });
@@ -79,7 +88,7 @@ async function resolveStrategyId(strategyMaybe) {
 
   // 2) Zo niet: lijst ophalen en matchen op _id, name, code
   const list = await fetch(`${CF}/users/current/configuration/strategies`, { headers: h() }).then(x => x.json());
-  const items = list || [];
+  const items = Array.isArray(list) ? list : [];
   const hit = items.find(s => s._id === strategyMaybe || s.name === strategyMaybe || s.code === strategyMaybe);
   if (!hit) {
     throw new Error(`Strategy not found for '${strategyMaybe}'. Maak/zoek de strategy in CopyFactory en gebruik de _id.`);
@@ -108,51 +117,79 @@ async function ensureSubscriberRole(accountId) {
 app.get('/api/health', async (_req, res) => {
   try {
     const r = await fetch(`${PROV}/users/current/accounts`, { headers: h() });
-    res.json({
-      ok: r.ok,
-      status: r.status,
-      region: REGION,
-      tokenPresent: !!TOKEN
-    });
+    res.json({ ok: r.ok, status: r.status, region: REGION, tokenPresent: !!TOKEN });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
-// ---------- Link account (create -> credentials -> deploy -> poll) ----------
+// ---------- Link account (create -> deploy -> poll) ----------
 
 /**
- * Body: { brokerServer, login, password, dryRun? }
+ * Body: {
+ *  brokerServer, login, password,
+ *  dryRun?, baseCurrency?=EUR, copyFactoryRoles?, platform?=mt5, region?=london, application?=CopyFactory
+ * }
+ * Voorbeeld Provider (EUR):
+ * {
+ *   "brokerServer":"NagaMarkets-Live",
+ *   "login":"8313355",
+ *   "password":"***",
+ *   "baseCurrency":"EUR",
+ *   "copyFactoryRoles":["PROVIDER"]
+ * }
  */
 app.post('/api/link-account', async (req, res) => {
-  const { brokerServer, login, password, dryRun } = req.body || {};
+  const {
+    brokerServer, login, password, dryRun,
+    baseCurrency = 'EUR',
+    copyFactoryRoles,
+    platform = 'mt5',
+    region = 'london',
+    application = 'CopyFactory'
+  } = req.body || {};
+
   if (!brokerServer || !login || !password) {
     return res.status(400).json({ ok: false, error: 'Missing fields: brokerServer, login, password' });
   }
   if (!TOKEN) return res.status(500).json({ ok: false, error: 'METAAPI_TOKEN missing' });
 
   try {
-    // 1) Create
+    // 1) Create (inclusief baseCurrency + roles indien meegegeven)
+    const createBody = {
+      name: `${login}@${brokerServer}`,
+      type: 'cloud',
+      region,
+      platform,
+      server: brokerServer,
+      login: login.toString(),
+      password,
+      application,
+      baseCurrency, // <<< BELANGRIJK: EUR instellen bij creatie
+      magic: Math.floor(Math.random() * 1000000),
+      keywords: [],
+      ...(copyFactoryRoles ? { copyFactoryRoles } : {})
+    };
+
     const create = await fetch(`${PROV}/users/current/accounts`, {
-      method: 'POST', headers: h(),
-      body: JSON.stringify({
-        name: `${login}@${brokerServer}`,
-        type: 'cloud',
-        region: 'london',
-        platform: 'mt5',
-        server: brokerServer,
-        login: login.toString(),
-        password,
-        application: 'CopyFactory',
-        magic: Math.floor(Math.random() * 1000000),
-        keywords: []
-      })
+      method: 'POST', headers: h(), body: JSON.stringify(createBody)
     });
     if (!create.ok) {
       return res.status(400).json({ ok: false, step: 'create', status: create.status, error: await create.text() });
     }
     const acc = await create.json();
     const id = acc.id;
+
+    // 1b) Als roles niet in create zaten, kun je nog enable doen (let op: baseCurrency is NIET achteraf wijzigbaar)
+    if (copyFactoryRoles?.length) {
+      const enable = await fetch(`${PROV}/users/current/accounts/${id}/enable-copy-factory-api`, {
+        method: 'POST', headers: h(),
+        body: JSON.stringify({ copyFactoryRoles, copyFactoryResourceSlots: 1 })
+      });
+      if (!enable.ok) {
+        console.warn('enable-copy-factory-api failed:', await enable.text());
+      }
+    }
 
     // 2) Deploy
     const dep = await fetch(`${PROV}/users/current/accounts/${id}/deploy`, {
@@ -164,7 +201,6 @@ app.post('/api/link-account', async (req, res) => {
     }
 
     if (dryRun) {
-      // test: opruimen
       await fetch(`${PROV}/users/current/accounts/${id}`, { method: 'DELETE', headers: h() }).catch(() => {});
       return res.json({ ok: true, dryRun: true });
     }
@@ -175,7 +211,7 @@ app.post('/api/link-account', async (req, res) => {
       return res.status(400).json({ ok: false, step: 'poll', ...wait, accountId: id });
     }
 
-    return res.json({ ok: true, accountId: id, region: REGION, connection: wait });
+    return res.json({ ok: true, accountId: id, region, connection: wait });
   } catch (e) {
     return res.status(400).json({ ok: false, error: String(e.message || e) });
   }
@@ -195,46 +231,40 @@ app.get('/api/account-metrics', async (req, res) => {
     const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
     const account = await api.metatraderAccountApi.getAccount(id);
 
-    // Staat & connectie check
     const state = account.state;
     const cs = account.connectionStatus;
     if (state !== 'DEPLOYED') {
       return res.status(400).json({ ok: false, error: 'Account not deployed', state, connectionStatus: cs });
     }
 
-    // wacht op connect (SDK helper)
     try {
       await Promise.race([
         account.waitConnected(),
         new Promise((_, rej) => setTimeout(() => rej(new Error('Connection timeout')), 30000))
       ]);
-    } catch (e) {
+    } catch (_e) {
       return res.status(400).json({ ok: false, error: 'Account connection timeout', state, connectionStatus: account.connectionStatus });
     }
 
     if (!account.getAccountInformation || typeof account.getAccountInformation !== 'function') {
-      return res.status(400).json({ 
-        ok: false, 
+      return res.status(400).json({
+        ok: false,
         error: 'Account methods not available. Account may still be starting up.',
         accountId: id,
         state: account.state,
         connectionStatus: account.connectionStatus,
-        suggestion: 'Wait a few minutes and try again'
+        suggestion: 'Try again shortly'
       });
     }
 
     let info, positions = [], orders = [];
-    try { 
-      info = await account.getAccountInformation(); 
-    } catch (infoErr) {
-      return res.status(400).json({ 
-        ok: false, 
+    try { info = await account.getAccountInformation(); } catch (infoErr) {
+      return res.status(400).json({
+        ok: false,
         error: 'Failed to retrieve account information',
-        details: infoErr.message,
-        suggestion: 'Account may still be connecting. Try again in a few minutes.'
+        details: infoErr.message
       });
     }
-    
     try { positions = await account.getPositions(); } catch {}
     try { orders = await account.getOrders(); } catch {}
 
@@ -267,7 +297,64 @@ app.post('/api/copy/enable-subscriber', async (req, res) => {
   }
 });
 
-// ---------- CopyFactory: start (Scale-by-Equity + resync) ----------
+// ---------- Strategy: create ----------
+
+/**
+ * Body: { name, accountId, description?, riskLimits? }
+ */
+app.post('/api/strategy/create', async (req, res) => {
+  const { name, accountId, description = 'EUR provider strategy', riskLimits = { maxLeverage: 100 } } = req.body || {};
+  if (!name || !accountId) return res.status(400).json({ ok: false, error: 'name and accountId are required' });
+
+  try {
+    const r = await fetch(`${CF}/users/current/configuration/strategies`, {
+      method: 'POST',
+      headers: h(),
+      body: JSON.stringify({ name, description, accountId, riskLimits })
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(r.status).json({ ok: false, error: data });
+
+    return res.json({ ok: true, strategy: data });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// ---------- Subscriber: configure (equity scaling) ----------
+
+/**
+ * Body: { accountId, strategyId, multiplier=1.0 }
+ * Maakt/overschrijft de subscriber-config voor dit account.
+ */
+app.post('/api/subscriber/configure', async (req, res) => {
+  const { accountId, strategyId, multiplier = 1.0 } = req.body || {};
+  if (!accountId || !strategyId) return res.status(400).json({ ok: false, error: 'accountId and strategyId required' });
+
+  try {
+    const put = await fetch(`${CF}/users/current/configuration/subscribers/${accountId}`, {
+      method: 'PUT',
+      headers: h(),
+      body: JSON.stringify({
+        name: `${accountId}-subscriber`,
+        subscriptions: [
+          {
+            strategyId,
+            tradeSizeScaling: { mode: 'equity', multiplier: Number(multiplier) }
+          }
+        ]
+      })
+    });
+    const data = await put.json().catch(() => ({}));
+    if (!put.ok) return res.status(400).json({ ok: false, error: data });
+
+    return res.json({ ok: true, config: data });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// ---------- CopyFactory: start (kept for convenience; uses resolve + resync) ----------
 
 /**
  * Body: { accountId, multiplier=1.0, mirrorOpenTrades=true, strategy? }
@@ -284,14 +371,14 @@ app.post('/api/copy/start', async (req, res) => {
     const strategyHint = strategy || STRAT;
     const strategyId = await resolveStrategyId(strategyHint);
 
-    // 3) upsert subscriber config - test zonder multiplier eerst
+    // 3) upsert subscriber config met equity scaling
     const put = await fetch(`${CF}/users/current/configuration/subscribers/${accountId}`, {
       method: 'PUT', headers: h(),
       body: JSON.stringify({
         name: `${accountId}-subscriber`,
         subscriptions: [{
-          strategyId
-          // Tijdelijk multiplier weglaten om validation error te debuggen
+          strategyId,
+          tradeSizeScaling: { mode: 'equity', multiplier: Number(multiplier) }
         }]
       })
     });
@@ -345,7 +432,7 @@ app.post('/api/copy/stop', async (req, res) => {
 
 /**
  * Query: ?accountId=...&strategy=...
- * Laat zien: account state, roles, strategyId-resolve, bestaande subscriber config.
+ * Laat zien: account state, roles, baseCurrency/broker currency/exchangeRate, strategy resolve, subscriber config.
  */
 app.get('/api/copy/diagnose', async (req, res) => {
   const { accountId, strategy } = req.query || {};
@@ -373,7 +460,9 @@ app.get('/api/copy/diagnose', async (req, res) => {
         state: acc.state,
         connectionStatus: acc.connectionStatus,
         copyFactoryRoles: acc.copyFactoryRoles,
-        baseCurrency: acc.baseCurrency
+        baseCurrency: acc.baseCurrency,
+        brokerAccountCurrency: acc.brokerAccountCurrency,
+        accountCurrencyExchangeRate: acc.accountCurrencyExchangeRate
       },
       strategyHint: strategy || STRAT,
       strategyId,
