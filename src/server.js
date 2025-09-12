@@ -219,10 +219,29 @@ app.post('/api/link-account', async (req, res) => {
       return res.json({ ok: true, dryRun: true });
     }
 
-    // 3) Poll voor connection
+ // 3) Poll voor connection
     const wait = await waitAccountConnected(id, 90000);
     if (!wait.ok) {
       return res.status(400).json({ ok: false, step: 'poll', ...wait, accountId: id });
+    }
+
+    // VOEG DIT TOE - MetaStats activeren voor account metrics
+    try {
+      const enableStats = await fetch(`${PROV}/users/current/accounts/${id}/enable-risk-management-api`, {
+        method: 'POST', 
+        headers: h(),
+        body: JSON.stringify({ 
+          riskManagementApiEnabled: true 
+        })
+      });
+      
+      if (enableStats.ok) {
+        console.log('MetaStats enabled for account:', id);
+      } else {
+        console.warn('MetaStats enable failed:', await enableStats.text());
+      }
+    } catch (e) {
+      console.warn('MetaStats enable error:', e.message);
     }
 
     return res.json({ ok: true, accountId: id, region, connection: wait });
