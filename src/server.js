@@ -1,37 +1,36 @@
 /**
- * server.js — Complete MetaApi + CopyFactory service (Node/Express)
+ * server.js — Complete MetaApi + CopyFactory service met statistieken en positie management
  *
  * Endpoints:
  *  - GET  /api/health
- *  - POST /api/link-account              { brokerServer, login, password, dryRun?, baseCurrency?, copyFactoryRoles?, platform?, region?, application? }
+ *  - POST /api/link-account
  *  - GET  /api/account-metrics?id=<metaapiAccountId>
- *  - POST /api/copy/enable-subscriber    { accountId }
- *  - POST /api/subscriber/configure      { accountId, strategyId, multiplier=1.0 }
- *  - POST /api/strategy/create           { name, accountId, description?, riskLimits? }
- *  - POST /api/copy/start                { accountId, multiplier=1.0, mirrorOpenTrades=true, strategy? }
- *  - POST /api/copy/stop                 { accountId }
- *  - GET  /api/copy/diagnose             ?accountId=...&strategy=...
- *
- * Node 18+ (fetch beschikbaar). Anders: npm i node-fetch en polyfill global.fetch.
+ *  - GET  /api/account-statistics?id=<metaapiAccountId>  [NIEUW]
+ *  - POST /api/copy/enable-subscriber
+ *  - POST /api/subscriber/configure
+ *  - POST /api/strategy/create
+ *  - POST /api/copy/start
+ *  - POST /api/copy/stop                  [UITGEBREID met positie sluiting]
+ *  - GET  /api/copy/diagnose
+ *  - POST /api/positions/close-all        [NIEUW]
  */
 
 const express = require('express');
-const MetaApiSdk = require('metaapi.cloud-sdk'); // npm i metaapi.cloud-sdk
+const MetaApiSdk = require('metaapi.cloud-sdk');
 const MetaApi = MetaApiSdk.default;
 
 // === ENV / CONSTANTS ===
 const TOKEN   = process.env.METAAPI_TOKEN || '';
 const REGION  = process.env.METAAPI_REGION || 'london';
-const STRAT   = process.env.PROVIDER_STRATEGY_ID || '3DvG'; // mag _id, name of code; we resolven naar _id
+const STRAT   = process.env.PROVIDER_STRATEGY_ID || '3DvG';
 const PROV    = `https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai`;
 const CLIENT  = `https://mt-client-api-v1.agiliumtrade.agiliumtrade.ai`;
 const CF      = `https://copyfactory-api-v1.london.agiliumtrade.ai`;
 const INTERNAL_KEY = process.env.INTERNAL_API_KEY || '';
 
-// Waarschuwing als token ontbreekt
 if (!TOKEN) console.warn('⚠️  METAAPI_TOKEN ontbreekt — voeg die toe in je env.');
 
-// SSL certificaat fix voor Vercel (Agiliumtrade certs kunnen streng staan)
+// SSL certificaat fix
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 const https = require('https');
 const originalFetch = global.fetch;
@@ -45,13 +44,12 @@ global.fetch = (url, options = {}) => {
 const app = express();
 app.use(express.json());
 
-// CORS middleware toevoegen
+// CORS middleware
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-internal-key');
   
-  // Handle preflight requests
   if (req.method === 'OPTIONS') {
     res.sendStatus(200);
   } else {
@@ -59,7 +57,7 @@ app.use((req, res, next) => {
   }
 });
 
-// (Optioneel) simpele header protectie voor alle POST routes
+// Internal key protection
 app.use((req, res, next) => {
   if (INTERNAL_KEY && req.method === 'POST') {
     const k = req.headers['x-internal-key'];
@@ -76,7 +74,6 @@ function h() {
 
 // ---------- Helpers ----------
 
-/** Wacht tot account DEPLOYED & CONNECTED is (maxWaitMs) */
 async function waitAccountConnected(accountId, maxWaitMs = 90000) {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
@@ -94,13 +91,10 @@ async function waitAccountConnected(accountId, maxWaitMs = 90000) {
   return { ok: false, error: 'Timeout waiting for CONNECTED' };
 }
 
-/** Resolve echte strategyId (_id). STRAT kan _id, name of code zijn. */
 async function resolveStrategyId(strategyMaybe) {
-  // 1) Probeer direct als _id
   let r = await fetch(`${CF}/users/current/configuration/strategies/${encodeURIComponent(strategyMaybe)}`, { headers: h() });
   if (r.ok) return strategyMaybe;
 
-  // 2) Zo niet: lijst ophalen en matchen op _id, name, code
   const list = await fetch(`${CF}/users/current/configuration/strategies`, { headers: h() }).then(x => x.json());
   const items = Array.isArray(list) ? list : [];
   const hit = items.find(s => s._id === strategyMaybe || s.name === strategyMaybe || s.code === strategyMaybe);
@@ -110,7 +104,6 @@ async function resolveStrategyId(strategyMaybe) {
   return hit._id;
 }
 
-/** Zorg dat account de SUBSCRIBER CopyFactory rol heeft */
 async function ensureSubscriberRole(accountId) {
   const info = await fetch(`${PROV}/users/current/accounts/${accountId}`, { headers: h() }).then(r => r.json());
   if (info.copyFactoryRoles?.includes('SUBSCRIBER')) return true;
@@ -126,6 +119,49 @@ async function ensureSubscriberRole(accountId) {
   return true;
 }
 
+// ---------- NIEUW: Functie om alle posities te sluiten ----------
+async function closeAllPositions(accountId) {
+  try {
+    const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
+    const account = await api.metatraderAccountApi.getAccount(accountId);
+    
+    // Wacht tot account verbonden is
+    await Promise.race([
+      account.waitConnected(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Connection timeout')), 30000))
+    ]);
+
+    // Haal alle open posities op
+    const positions = await account.getPositions();
+    
+    if (positions.length === 0) {
+      return { ok: true, closedCount: 0, message: 'Geen open posities gevonden' };
+    }
+
+    // Sluit alle posities
+    const closeResults = [];
+    for (const position of positions) {
+      try {
+        const result = await account.closePosition(position.id);
+        closeResults.push({ success: true, positionId: position.id, symbol: position.symbol });
+      } catch (err) {
+        closeResults.push({ success: false, positionId: position.id, error: err.message });
+      }
+    }
+
+    const successCount = closeResults.filter(r => r.success).length;
+    
+    return {
+      ok: true,
+      closedCount: successCount,
+      totalPositions: positions.length,
+      results: closeResults
+    };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // ---------- Health ----------
 
 app.get('/api/health', async (_req, res) => {
@@ -137,22 +173,8 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-// ---------- Link account (create -> deploy -> poll) ----------
+// ---------- Link account ----------
 
-/**
- * Body: {
- *  brokerServer, login, password,
- *  dryRun?, baseCurrency?=EUR, copyFactoryRoles?, platform?=mt5, region?=london, application?=CopyFactory
- * }
- * Voorbeeld Provider (EUR):
- * {
- *   "brokerServer":"NagaMarkets-Live",
- *   "login":"8313355",
- *   "password":"***",
- *   "baseCurrency":"EUR",
- *   "copyFactoryRoles":["PROVIDER"]
- * }
- */
 app.post('/api/link-account', async (req, res) => {
   const {
     brokerServer, login, password, dryRun,
@@ -169,7 +191,6 @@ app.post('/api/link-account', async (req, res) => {
   if (!TOKEN) return res.status(500).json({ ok: false, error: 'METAAPI_TOKEN missing' });
 
   try {
-    // 1) Create (inclusief baseCurrency + roles indien meegegeven)
     const createBody = {
       name: `${login}@${brokerServer}`,
       type: 'cloud',
@@ -179,7 +200,7 @@ app.post('/api/link-account', async (req, res) => {
       login: login.toString(),
       password,
       application,
-      baseCurrency, // <<< BELANGRIJK: EUR instellen bij creatie
+      baseCurrency,
       magic: Math.floor(Math.random() * 1000000),
       keywords: [],
       ...(copyFactoryRoles ? { copyFactoryRoles } : {})
@@ -194,7 +215,6 @@ app.post('/api/link-account', async (req, res) => {
     const acc = await create.json();
     const id = acc.id;
 
-    // 1b) Als roles niet in create zaten, kun je nog enable doen (let op: baseCurrency is NIET achteraf wijzigbaar)
     if (copyFactoryRoles?.length) {
       const enable = await fetch(`${PROV}/users/current/accounts/${id}/enable-copy-factory-api`, {
         method: 'POST', headers: h(),
@@ -205,7 +225,6 @@ app.post('/api/link-account', async (req, res) => {
       }
     }
 
-    // 2) Deploy
     const dep = await fetch(`${PROV}/users/current/accounts/${id}/deploy`, {
       method: 'POST', headers: h()
     });
@@ -219,13 +238,12 @@ app.post('/api/link-account', async (req, res) => {
       return res.json({ ok: true, dryRun: true });
     }
 
- // 3) Poll voor connection
     const wait = await waitAccountConnected(id, 90000);
     if (!wait.ok) {
       return res.status(400).json({ ok: false, step: 'poll', ...wait, accountId: id });
     }
 
-    // VOEG DIT TOE - MetaStats activeren voor account metrics
+    // Enable MetaStats voor statistieken
     try {
       const enableStats = await fetch(`${PROV}/users/current/accounts/${id}/enable-risk-management-api`, {
         method: 'POST', 
@@ -250,11 +268,8 @@ app.post('/api/link-account', async (req, res) => {
   }
 });
 
-// ---------- Account metrics (via officiële SDK) ----------
+// ---------- Account metrics ----------
 
-/**
- * Query: ?id=<metaapiAccountId>
- */
 app.get('/api/account-metrics', async (req, res) => {
   const id = req.query.id;
   if (!id) return res.status(400).json({ ok: false, error: 'Missing id' });
@@ -304,6 +319,7 @@ app.get('/api/account-metrics', async (req, res) => {
     res.json({
       ok: true,
       info,
+      positions,
       counts: { positions: positions.length, orders: orders.length },
       accountState: account.state,
       connectionStatus: account.connectionStatus
@@ -313,11 +329,94 @@ app.get('/api/account-metrics', async (req, res) => {
   }
 });
 
-// ---------- CopyFactory: enable SUBSCRIBER ----------
+// ---------- NIEUW: Account statistieken endpoint ----------
+app.get('/api/account-statistics', async (req, res) => {
+  const id = req.query.id;
+  if (!id) return res.status(400).json({ ok: false, error: 'Missing id' });
+  if (!TOKEN) return res.status(500).json({ ok: false, error: 'METAAPI_TOKEN missing' });
 
-/**
- * Body: { accountId }
- */
+  try {
+    const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
+    
+    // Probeer MetaStats statistieken op te halen
+    const metaStats = api.metaStatsApi;
+    
+    // Haal account metrics op voor de laatste 30 dagen
+    const metrics = await metaStats.getMetrics(id, {
+      includeOpenPositions: true,
+      includePendingOrders: false
+    });
+
+    // Bereken rendement percentages
+    const dailyGrowth = metrics.dailyGrowth || 0;
+    const monthlyGrowth = metrics.monthlyGrowth || 0;
+    const totalGrowth = metrics.gain || 0;
+
+    res.json({
+      ok: true,
+      statistics: {
+        balance: metrics.balance || 0,
+        equity: metrics.equity || 0,
+        profit: metrics.profit || 0,
+        dailyGrowth: dailyGrowth,
+        monthlyGrowth: monthlyGrowth,
+        totalGrowth: totalGrowth,
+        deposits: metrics.deposits || 0,
+        withdrawals: metrics.withdrawals || 0,
+        totalTrades: metrics.trades || 0,
+        wonTrades: metrics.wonTrades || 0,
+        lostTrades: metrics.lostTrades || 0,
+        winRate: metrics.wonTrades && metrics.trades ? 
+          ((metrics.wonTrades / metrics.trades) * 100).toFixed(2) : 0,
+        averageWin: metrics.averageWin || 0,
+        averageLoss: metrics.averageLoss || 0,
+        bestTrade: metrics.bestTrade || 0,
+        worstTrade: metrics.worstTrade || 0,
+        maxDrawdown: metrics.maxDrawdown || 0,
+        riskRewardRatio: metrics.averageWin && metrics.averageLoss ? 
+          (Math.abs(metrics.averageWin / metrics.averageLoss)).toFixed(2) : 0
+      }
+    });
+  } catch (e) {
+    // Als MetaStats niet beschikbaar is, val terug op basis account info
+    try {
+      const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
+      const account = await api.metatraderAccountApi.getAccount(id);
+      
+      await Promise.race([
+        account.waitConnected(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Connection timeout')), 15000))
+      ]);
+
+      const info = await account.getAccountInformation();
+      
+      res.json({
+        ok: true,
+        statistics: {
+          balance: info.balance || 0,
+          equity: info.equity || 0,
+          profit: (info.equity - info.balance) || 0,
+          margin: info.margin || 0,
+          freeMargin: info.freeMargin || 0,
+          marginLevel: info.marginLevel || 0,
+          dailyGrowth: 0,
+          monthlyGrowth: 0,
+          totalGrowth: 0,
+          message: 'Uitgebreide statistieken worden geladen...'
+        }
+      });
+    } catch (fallbackError) {
+      res.status(400).json({ 
+        ok: false, 
+        error: 'Statistieken tijdelijk niet beschikbaar',
+        details: e.message 
+      });
+    }
+  }
+});
+
+// ---------- Enable subscriber ----------
+
 app.post('/api/copy/enable-subscriber', async (req, res) => {
   const { accountId } = req.body || {};
   if (!accountId) return res.status(400).json({ ok: false, error: 'Missing accountId' });
@@ -330,11 +429,8 @@ app.post('/api/copy/enable-subscriber', async (req, res) => {
   }
 });
 
-// ---------- Strategy: create ----------
+// ---------- Strategy create ----------
 
-/**
- * Body: { name, accountId, description?, riskLimits? }
- */
 app.post('/api/strategy/create', async (req, res) => {
   const { name, accountId, description = 'EUR provider strategy', riskLimits = { maxLeverage: 100 } } = req.body || {};
   if (!name || !accountId) return res.status(400).json({ ok: false, error: 'name and accountId are required' });
@@ -354,12 +450,8 @@ app.post('/api/strategy/create', async (req, res) => {
   }
 });
 
-// ---------- Subscriber: configure (equity scaling) ----------
+// ---------- Subscriber configure ----------
 
-/**
- * Body: { accountId, strategyId, multiplier=1.0 }
- * Maakt/overschrijft de subscriber-config voor dit account.
- */
 app.post('/api/subscriber/configure', async (req, res) => {
   const { accountId, strategyId, multiplier = 1.0 } = req.body || {};
   if (!accountId || !strategyId) return res.status(400).json({ ok: false, error: 'accountId and strategyId required' });
@@ -387,24 +479,18 @@ app.post('/api/subscriber/configure', async (req, res) => {
   }
 });
 
-// ---------- CopyFactory: start (kept for convenience; uses resolve + resync) ----------
+// ---------- Copy start ----------
 
-/**
- * Body: { accountId, multiplier=1.0, mirrorOpenTrades=true, strategy? }
- */
 app.post('/api/copy/start', async (req, res) => {
   const { accountId, multiplier = 1.0, mirrorOpenTrades = true, strategy } = req.body || {};
   if (!accountId) return res.status(400).json({ ok: false, error: 'Missing accountId' });
 
   try {
-    // 1) zorg dat SUBSCRIBER rol aan staat
     await ensureSubscriberRole(accountId);
 
-    // 2) resolve echte strategyId
     const strategyHint = strategy || STRAT;
     const strategyId = await resolveStrategyId(strategyHint);
 
-    // 3) upsert subscriber config met equity scaling
     const put = await fetch(`${CF}/users/current/configuration/subscribers/${accountId}`, {
       method: 'PUT', headers: h(),
       body: JSON.stringify({
@@ -419,7 +505,6 @@ app.post('/api/copy/start', async (req, res) => {
       return res.status(400).json({ ok: false, error: `subscriber upsert failed: ${put.status} ${await put.text()}` });
     }
 
-    // 4) spiegel open posities
     if (mirrorOpenTrades) {
       const rs = await fetch(`${CF}/users/current/subscribers/${accountId}/resynchronize`, {
         method: 'POST', headers: h()
@@ -438,16 +523,14 @@ app.post('/api/copy/start', async (req, res) => {
   }
 });
 
-// ---------- CopyFactory: stop (subscriptions leegmaken) ----------
+// ---------- VERBETERD: Copy stop met positie sluiting ----------
 
-/**
- * Body: { accountId }
- */
 app.post('/api/copy/stop', async (req, res) => {
-  const { accountId } = req.body || {};
+  const { accountId, closePositions = true } = req.body || {};
   if (!accountId) return res.status(400).json({ ok: false, error: 'Missing accountId' });
 
   try {
+    // 1. Stop eerst de copy trading
     const put = await fetch(`${CF}/users/current/configuration/subscribers/${accountId}`, {
       method: 'PUT', headers: h(),
       body: JSON.stringify({ name: `${accountId}-subscriber`, subscriptions: [] })
@@ -455,7 +538,31 @@ app.post('/api/copy/stop', async (req, res) => {
     if (!put.ok) {
       return res.status(400).json({ ok: false, error: `unsubscribe failed: ${put.status} ${await put.text()}` });
     }
-    res.json({ ok: true });
+
+    // 2. Sluit alle open posities als gevraagd
+    let closeResult = null;
+    if (closePositions) {
+      closeResult = await closeAllPositions(accountId);
+    }
+
+    res.json({ 
+      ok: true, 
+      copyingStopped: true,
+      positionsClosed: closeResult
+    });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// ---------- NIEUW: Endpoint om alleen posities te sluiten ----------
+app.post('/api/positions/close-all', async (req, res) => {
+  const { accountId } = req.body || {};
+  if (!accountId) return res.status(400).json({ ok: false, error: 'Missing accountId' });
+
+  try {
+    const result = await closeAllPositions(accountId);
+    res.json(result);
   } catch (e) {
     res.status(400).json({ ok: false, error: String(e.message || e) });
   }
@@ -463,10 +570,6 @@ app.post('/api/copy/stop', async (req, res) => {
 
 // ---------- Diagnose ----------
 
-/**
- * Query: ?accountId=...&strategy=...
- * Laat zien: account state, roles, baseCurrency/broker currency/exchangeRate, strategy resolve, subscriber config.
- */
 app.get('/api/copy/diagnose', async (req, res) => {
   const { accountId, strategy } = req.query || {};
   if (!accountId) return res.status(400).json({ ok: false, error: 'Missing accountId' });
