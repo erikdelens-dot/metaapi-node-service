@@ -245,11 +245,11 @@ app.post('/api/link-account', async (req, res) => {
 
     // Enable MetaStats voor statistieken
     try {
-      const enableStats = await fetch(`${PROV}/users/current/accounts/${id}/enable-risk-management-api`, {
+      const enableStats = await fetch(`${PROV}/users/current/accounts/${id}/enable-account-features`, {
         method: 'POST', 
         headers: h(),
         body: JSON.stringify({ 
-          riskManagementApiEnabled: true 
+          metastatsApiEnabled: true 
         })
       });
       
