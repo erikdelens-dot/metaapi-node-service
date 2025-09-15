@@ -336,49 +336,74 @@ app.get('/api/account-statistics', async (req, res) => {
   if (!TOKEN) return res.status(500).json({ ok: false, error: 'METAAPI_TOKEN missing' });
 
   try {
-    const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
-    
-    // Probeer MetaStats statistieken op te halen
-    const metaStats = api.metaStatsApi;
-    
-    // Haal account metrics op voor de laatste 30 dagen
-    const metrics = await metaStats.getMetrics(id, {
-      includeOpenPositions: true,
-      includePendingOrders: false
+    // Gebruik de directe MetaStats API endpoint
+    const metricsResponse = await fetch(`${PROV}/users/current/accounts/${id}/metrics`, {
+      headers: h()
     });
 
-    // Bereken rendement percentages
-    const dailyGrowth = metrics.dailyGrowth || 0;
-    const monthlyGrowth = metrics.monthlyGrowth || 0;
-    const totalGrowth = metrics.gain || 0;
+    if (metricsResponse.ok) {
+      const metrics = await metricsResponse.json();
+      
+      // Bereken rendement percentages
+      const dailyGrowth = metrics.dailyGrowth || 0;
+      const monthlyGrowth = metrics.monthlyGrowth || 0;
+      const totalGrowth = metrics.gain || 0;
 
-    res.json({
-      ok: true,
-      statistics: {
-        balance: metrics.balance || 0,
-        equity: metrics.equity || 0,
-        profit: metrics.profit || 0,
-        dailyGrowth: dailyGrowth,
-        monthlyGrowth: monthlyGrowth,
-        totalGrowth: totalGrowth,
-        deposits: metrics.deposits || 0,
-        withdrawals: metrics.withdrawals || 0,
-        totalTrades: metrics.trades || 0,
-        wonTrades: metrics.wonTrades || 0,
-        lostTrades: metrics.lostTrades || 0,
-        winRate: metrics.wonTrades && metrics.trades ? 
-          ((metrics.wonTrades / metrics.trades) * 100).toFixed(2) : 0,
-        averageWin: metrics.averageWin || 0,
-        averageLoss: metrics.averageLoss || 0,
-        bestTrade: metrics.bestTrade || 0,
-        worstTrade: metrics.worstTrade || 0,
-        maxDrawdown: metrics.maxDrawdown || 0,
-        riskRewardRatio: metrics.averageWin && metrics.averageLoss ? 
-          (Math.abs(metrics.averageWin / metrics.averageLoss)).toFixed(2) : 0
-      }
-    });
+      res.json({
+        ok: true,
+        statistics: {
+          balance: metrics.balance || 0,
+          equity: metrics.equity || 0,
+          profit: metrics.profit || 0,
+          dailyGrowth: dailyGrowth,
+          monthlyGrowth: monthlyGrowth,
+          totalGrowth: totalGrowth,
+          deposits: metrics.deposits || 0,
+          withdrawals: metrics.withdrawals || 0,
+          totalTrades: metrics.trades || 0,
+          wonTrades: metrics.wonTrades || 0,
+          lostTrades: metrics.lostTrades || 0,
+          winRate: metrics.wonTrades && metrics.trades ? 
+            ((metrics.wonTrades / metrics.trades) * 100).toFixed(2) : 0,
+          averageWin: metrics.averageWin || 0,
+          averageLoss: metrics.averageLoss || 0,
+          bestTrade: metrics.bestTrade || 0,
+          worstTrade: metrics.worstTrade || 0,
+          maxDrawdown: metrics.absoluteDrawdown || 0,
+          riskRewardRatio: metrics.averageWin && metrics.averageLoss ? 
+            (Math.abs(metrics.averageWin / metrics.averageLoss)).toFixed(2) : 0
+        }
+      });
+    } else {
+      // Als MetaStats niet beschikbaar is, val terug op basis account info
+      const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
+      const account = await api.metatraderAccountApi.getAccount(id);
+      
+      await Promise.race([
+        account.waitConnected(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Connection timeout')), 15000))
+      ]);
+
+      const info = await account.getAccountInformation();
+      
+      res.json({
+        ok: true,
+        statistics: {
+          balance: info.balance || 0,
+          equity: info.equity || 0,
+          profit: (info.equity - info.balance) || 0,
+          margin: info.margin || 0,
+          freeMargin: info.freeMargin || 0,
+          marginLevel: info.marginLevel || 0,
+          dailyGrowth: 0,
+          monthlyGrowth: 0,
+          totalGrowth: 0,
+          message: 'MetaStats wordt geactiveerd, statistieken komen beschikbaar na eerste trades'
+        }
+      });
+    }
   } catch (e) {
-    // Als MetaStats niet beschikbaar is, val terug op basis account info
+    // Fallback naar basis account info
     try {
       const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
       const account = await api.metatraderAccountApi.getAccount(id);
@@ -402,7 +427,11 @@ app.get('/api/account-statistics', async (req, res) => {
           dailyGrowth: 0,
           monthlyGrowth: 0,
           totalGrowth: 0,
-          message: 'Uitgebreide statistieken worden geladen...'
+          totalTrades: 0,
+          winRate: 0,
+          maxDrawdown: 0,
+          riskRewardRatio: 0,
+          message: 'Uitgebreide statistieken worden verzameld...'
         }
       });
     } catch (fallbackError) {
