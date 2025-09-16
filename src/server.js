@@ -19,12 +19,13 @@ const express = require('express');
 const MetaApiSdk = require('metaapi.cloud-sdk');
 const MetaApi = MetaApiSdk.default;
 
-// === ENV / CONSTANTS ===
+// === ENV / CONSTANTS - LONDON REGION URLs ===
 const TOKEN   = process.env.METAAPI_TOKEN || '';
 const REGION  = process.env.METAAPI_REGION || 'london';
 const STRAT   = process.env.PROVIDER_STRATEGY_ID || '3DvG';
-const PROV    = `https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai`;
-const CLIENT  = `https://mt-client-api-v1.agiliumtrade.agiliumtrade.ai`;
+const PROV    = `https://mt-provisioning-api-v1.london.agiliumtrade.ai`;
+const CLIENT  = `https://mt-client-api-v1.london.agiliumtrade.ai`;
+const METASTATS = `https://metastats-api-v1.london.agiliumtrade.ai`;
 const CF      = `https://copyfactory-api-v1.london.agiliumtrade.ai`;
 const INTERNAL_KEY = process.env.INTERNAL_API_KEY || '';
 
@@ -122,7 +123,7 @@ async function ensureSubscriberRole(accountId) {
 // ---------- NIEUW: Functie om alle posities te sluiten ----------
 async function closeAllPositions(accountId) {
   try {
-    const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
+    const api = new MetaApi(TOKEN, { domain: `london.agiliumtrade.ai` });
     const account = await api.metatraderAccountApi.getAccount(accountId);
     
     // Wacht tot account verbonden is
@@ -276,7 +277,7 @@ app.get('/api/account-metrics', async (req, res) => {
   if (!TOKEN) return res.status(500).json({ ok: false, error: 'METAAPI_TOKEN missing' });
 
   try {
-    const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
+    const api = new MetaApi(TOKEN, { domain: `london.agiliumtrade.ai` });
     const account = await api.metatraderAccountApi.getAccount(id);
 
     const state = account.state;
@@ -288,7 +289,7 @@ app.get('/api/account-metrics', async (req, res) => {
     try {
       await Promise.race([
         account.waitConnected(),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('Connection timeout')), 30000))
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Connection timeout')), 60000))
       ]);
     } catch (_e) {
       return res.status(400).json({ ok: false, error: 'Account connection timeout', state, connectionStatus: account.connectionStatus });
@@ -336,8 +337,8 @@ app.get('/api/account-statistics', async (req, res) => {
   if (!TOKEN) return res.status(500).json({ ok: false, error: 'METAAPI_TOKEN missing' });
 
   try {
-    // Gebruik de directe MetaStats API endpoint
-    const metricsResponse = await fetch(`${PROV}/users/current/accounts/${id}/metrics`, {
+    // Gebruik de London MetaStats API endpoint
+    const metricsResponse = await fetch(`${METASTATS}/users/current/accounts/${id}/metrics`, {
       headers: h()
     });
 
@@ -376,7 +377,7 @@ app.get('/api/account-statistics', async (req, res) => {
       });
     } else {
       // Als MetaStats niet beschikbaar is, val terug op basis account info
-      const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
+      const api = new MetaApi(TOKEN, { domain: `london.agiliumtrade.ai` });
       const account = await api.metatraderAccountApi.getAccount(id);
       
       await Promise.race([
@@ -405,7 +406,7 @@ app.get('/api/account-statistics', async (req, res) => {
   } catch (e) {
     // Fallback naar basis account info
     try {
-      const api = new MetaApi(TOKEN, { domain: `agiliumtrade.ai` });
+      const api = new MetaApi(TOKEN, { domain: `london.agiliumtrade.ai` });
       const account = await api.metatraderAccountApi.getAccount(id);
       
       await Promise.race([
